@@ -5,6 +5,9 @@ using System.Reflection;
 using System.Collections;
 using System.Text;
 using System.Runtime.Serialization;
+#if NET4
+using System.Linq;
+#endif
 #if !SILVERLIGHT
 using System.Data;
 #endif
@@ -12,7 +15,7 @@ using System.Collections.Specialized;
 
 namespace fastJSON
 {
-    internal struct Getters
+    public struct Getters
     {
         public string Name;
         public string lcName;
@@ -20,7 +23,7 @@ namespace fastJSON
         public Reflection.GenericGetter Getter;
     }
 
-    internal enum myPropInfoType
+    public enum myPropInfoType
     {
         Int,
         Long,
@@ -45,7 +48,7 @@ namespace fastJSON
         Unknown,
     }
 
-    internal struct myPropInfo
+    public class myPropInfo
     {
         public Type pt;
         public Type bt;
@@ -54,7 +57,7 @@ namespace fastJSON
         public Reflection.GenericGetter getter;
         public Type[] GenericTypes;
         public string Name;
-#if net4
+#if NET4
         public string memberName;
 #endif
         public myPropInfoType Type;
@@ -67,9 +70,9 @@ namespace fastJSON
         public bool IsInterface;
     }
 
-    internal sealed class Reflection
+    public sealed class Reflection
     {
-        // Sinlgeton pattern 4 from : http://csharpindepth.com/articles/general/singleton.aspx
+        // Singleton pattern 4 from : http://csharpindepth.com/articles/general/singleton.aspx
         private static readonly Reflection instance = new Reflection();
         // Explicit static constructor to tell C# compiler
         // not to mark type as beforefieldinit
@@ -81,21 +84,83 @@ namespace fastJSON
         }
         public static Reflection Instance { get { return instance; } }
 
-        internal delegate object GenericSetter(object target, object value);
-        internal delegate object GenericGetter(object obj);
-        private delegate object CreateObject();
+        public static bool RDBMode = false;
 
-        private SafeDictionary<Type, string> _tyname = new SafeDictionary<Type, string>();
-        private SafeDictionary<string, Type> _typecache = new SafeDictionary<string, Type>();
-        private SafeDictionary<Type, CreateObject> _constrcache = new SafeDictionary<Type, CreateObject>();
-        private SafeDictionary<Type, Getters[]> _getterscache = new SafeDictionary<Type, Getters[]>();
-        private SafeDictionary<string, Dictionary<string, myPropInfo>> _propertycache = new SafeDictionary<string, Dictionary<string, myPropInfo>>();
-        private SafeDictionary<Type, Type[]> _genericTypes = new SafeDictionary<Type, Type[]>();
-        private SafeDictionary<Type, Type> _genericTypeDef = new SafeDictionary<Type, Type>();
+        public delegate string Serialize(object data);
+        public delegate object Deserialize(string data);
+
+        public delegate object GenericSetter(object target, object value);
+        public delegate object GenericGetter(object obj);
+        private delegate object CreateObject();
+        private delegate object CreateList(int capacity);
+
+        private SafeDictionary<Type, string> _tyname = new SafeDictionary<Type, string>(10);
+        private SafeDictionary<string, Type> _typecache = new SafeDictionary<string, Type>(10);
+        private SafeDictionary<Type, CreateObject> _constrcache = new SafeDictionary<Type, CreateObject>(10);
+        private SafeDictionary<Type, CreateList> _conlistcache = new SafeDictionary<Type, CreateList>(10);
+        private SafeDictionary<Type, Getters[]> _getterscache = new SafeDictionary<Type, Getters[]>(10);
+        private SafeDictionary<string, Dictionary<string, myPropInfo>> _propertycache = new SafeDictionary<string, Dictionary<string, myPropInfo>>(10);
+        private SafeDictionary<Type, Type[]> _genericTypes = new SafeDictionary<Type, Type[]>(10);
+        private SafeDictionary<Type, Type> _genericTypeDef = new SafeDictionary<Type, Type>(10);
+        private static SafeDictionary<short, OpCode> _opCodes;
+
+        private static bool TryGetOpCode(short code, out OpCode opCode)
+        {
+            if (_opCodes != null)
+                return _opCodes.TryGetValue(code, out opCode);
+            var dict = new SafeDictionary<short, OpCode>();
+            foreach (var fi in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (!typeof(OpCode).IsAssignableFrom(fi.FieldType)) continue;
+                var innerOpCode = (OpCode)fi.GetValue(null);
+                if (innerOpCode.OpCodeType != OpCodeType.Nternal)
+                    dict.Add(innerOpCode.Value, innerOpCode);
+            }
+            _opCodes = dict;
+            return _opCodes.TryGetValue(code, out opCode);
+        }
 
         #region bjson custom types
-        internal UnicodeEncoding unicode = new UnicodeEncoding();
-        internal UTF8Encoding utf8 = new UTF8Encoding();
+        //internal UnicodeEncoding unicode = new UnicodeEncoding();
+        private static UTF8Encoding utf8 = new UTF8Encoding();
+
+        // TODO : optimize utf8 
+        public static byte[] UTF8GetBytes(string str)
+        {
+            return utf8.GetBytes(str);
+        }
+
+        public static string UTF8GetString(byte[] bytes, int offset, int len)
+        {
+            return utf8.GetString(bytes, offset, len);
+        }
+
+        public unsafe static byte[] UnicodeGetBytes(string str)
+        {
+            int len = str.Length * 2;
+            byte[] b = new byte[len];
+            fixed (void* ptr = str)
+            {
+                System.Runtime.InteropServices.Marshal.Copy(new IntPtr(ptr), b, 0, len);
+            }
+            return b;
+        }
+
+        public static string UnicodeGetString(byte[] b)
+        {
+            return UnicodeGetString(b, 0, b.Length);
+        }
+
+        public unsafe static string UnicodeGetString(byte[] bytes, int offset, int buflen)
+        {
+            string str = "";
+            fixed (byte* bptr = bytes)
+            {
+                char* cptr = (char*)(bptr + offset);
+                str = new string(cptr, 0, buflen / 2);
+            }
+            return str;
+        }
         #endregion
 
         #region json custom types
@@ -123,7 +188,7 @@ namespace fastJSON
 
         internal bool IsTypeRegistered(Type t)
         {
-            if (_customSerializer.Count == 0)
+            if (_customSerializer.Count() == 0)
                 return false;
             Serialize s;
             return _customSerializer.TryGetValue(t, out s);
@@ -156,7 +221,7 @@ namespace fastJSON
             }
         }
 
-        public Dictionary<string, myPropInfo> Getproperties(Type type, string typename)
+        public Dictionary<string, myPropInfo> Getproperties(Type type, string typename, bool ShowReadOnlyProperties)
         {
             Dictionary<string, myPropInfo> sd = null;
             if (_propertycache.TryGetValue(typename, out sd))
@@ -165,7 +230,7 @@ namespace fastJSON
             }
             else
             {
-                sd = new Dictionary<string, myPropInfo>();
+                sd = new Dictionary<string, myPropInfo>(10);
                 var bf = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
                 PropertyInfo[] pr = type.GetProperties(bf);
                 foreach (PropertyInfo p in pr)
@@ -174,11 +239,11 @@ namespace fastJSON
                         continue;
 
                     myPropInfo d = CreateMyProp(p.PropertyType, p.Name);
-                    d.setter = Reflection.CreateSetMethod(type, p);
+                    d.setter = Reflection.CreateSetMethod(type, p, ShowReadOnlyProperties);
                     if (d.setter != null)
                         d.CanWrite = true;
                     d.getter = Reflection.CreateGetMethod(type, p);
-#if net4
+#if NET4
                     var att = p.GetCustomAttributes(true);
                     foreach (var at in att)
                     {
@@ -193,7 +258,7 @@ namespace fastJSON
                         sd.Add(d.memberName, d);
                     else
 #endif
-                        sd.Add(p.Name.ToLower(), d);
+                        sd.Add(p.Name.ToLowerInvariant(), d);
                 }
                 FieldInfo[] fi = type.GetFields(bf);
                 foreach (FieldInfo f in fi)
@@ -205,7 +270,7 @@ namespace fastJSON
                         if (d.setter != null)
                             d.CanWrite = true;
                         d.getter = Reflection.CreateGetField(type, f);
-#if net4
+#if NET4
                         var att = f.GetCustomAttributes(true);
                         foreach (var at in att)
                         {
@@ -220,7 +285,7 @@ namespace fastJSON
                             sd.Add(d.memberName, d);
                         else
 #endif
-                            sd.Add(f.Name.ToLower(), d);
+                            sd.Add(f.Name.ToLowerInvariant(), d);
                     }
                 }
 
@@ -276,7 +341,7 @@ namespace fastJSON
             if (t.IsGenericType)
             {
                 d.IsGenericType = true;
-                d.bt = t.GetGenericArguments()[0];
+                d.bt = Reflection.Instance.GetGenericArguments(t)[0];
             }
 
             d.pt = t;
@@ -295,9 +360,9 @@ namespace fastJSON
             return conversionType;
         }
 
-#region [   PROPERTY GET SET   ]
+        #region [   PROPERTY GET SET   ]
 
-        internal string GetTypeAssemblyName(Type t)
+        public string GetTypeAssemblyName(Type t)
         {
             string val = "";
             if (_tyname.TryGetValue(t, out val))
@@ -318,14 +383,63 @@ namespace fastJSON
             else
             {
                 Type t = Type.GetType(typename);
-                //if (t == null) // RaptorDB : loading runtime assemblies
-                //{
-                //    t = Type.GetType(typename, (name) => {
-                //        return AppDomain.CurrentDomain.GetAssemblies().Where(z => z.FullName == name.FullName).FirstOrDefault();
-                //    }, null, true);
-                //}
+#if NET4
+                if (RDBMode)
+                {
+                    if (t == null) // RaptorDB : loading runtime assemblies
+                    {
+                        t = Type.GetType(typename, (name) =>
+                        {
+                            return AppDomain.CurrentDomain.GetAssemblies().Where(z => z.FullName == name.FullName).FirstOrDefault();
+                        }, null, true);
+                    }
+                }
+#endif
                 _typecache.Add(typename, t);
                 return t;
+            }
+        }
+
+        internal object FastCreateList(Type objtype, int capacity)
+        {
+            try
+            {
+                int count = 10;
+                if (capacity > 10)
+                    count = capacity;
+                CreateList c = null;
+                if (_conlistcache.TryGetValue(objtype, out c))
+                {
+                    if (c != null) // kludge : non capacity lists
+                        return c(count);
+                    else
+                        return FastCreateInstance(objtype);
+                }
+                else
+                {
+                    var cinfo = objtype.GetConstructor(new Type[] { typeof(int) });
+                    if (cinfo != null)
+                    {
+                        DynamicMethod dynMethod = new DynamicMethod("_fcil", objtype, new Type[] { typeof(int) }, true);
+                        ILGenerator ilGen = dynMethod.GetILGenerator();
+                        ilGen.Emit(OpCodes.Ldarg_0);
+                        ilGen.Emit(OpCodes.Newobj, objtype.GetConstructor(new Type[] { typeof(int) }));
+                        ilGen.Emit(OpCodes.Ret);
+                        c = (CreateList)dynMethod.CreateDelegate(typeof(CreateList));
+                        _conlistcache.Add(objtype, c);
+                        return c(count);
+                    }
+                    else
+                    {
+                        _conlistcache.Add(objtype, null);// kludge : non capacity lists
+                        return FastCreateInstance(objtype);
+                    }
+                }
+            }
+            catch (Exception exc)
+            {
+                throw new Exception(string.Format("Failed to fast create instance for type '{0}' from assembly '{1}'",
+                    objtype.FullName, objtype.AssemblyQualifiedName), exc);
             }
         }
 
@@ -342,7 +456,7 @@ namespace fastJSON
                 {
                     if (objtype.IsClass)
                     {
-                        DynamicMethod dynMethod = new DynamicMethod("_", objtype, null);
+                        DynamicMethod dynMethod = new DynamicMethod("_fcic", objtype, null, true);
                         ILGenerator ilGen = dynMethod.GetILGenerator();
                         ilGen.Emit(OpCodes.Newobj, objtype.GetConstructor(Type.EmptyTypes));
                         ilGen.Emit(OpCodes.Ret);
@@ -351,7 +465,7 @@ namespace fastJSON
                     }
                     else // structs
                     {
-                        DynamicMethod dynMethod = new DynamicMethod("_", typeof(object), null);
+                        DynamicMethod dynMethod = new DynamicMethod("_fcis", typeof(object), null, true);
                         ILGenerator ilGen = dynMethod.GetILGenerator();
                         var lv = ilGen.DeclareLocal(objtype);
                         ilGen.Emit(OpCodes.Ldloca_S, lv);
@@ -377,7 +491,7 @@ namespace fastJSON
             Type[] arguments = new Type[2];
             arguments[0] = arguments[1] = typeof(object);
 
-            DynamicMethod dynamicSet = new DynamicMethod("_", typeof(object), arguments, type);
+            DynamicMethod dynamicSet = new DynamicMethod("_csf", typeof(object), arguments, type, true);
 
             ILGenerator il = dynamicSet.GetILGenerator();
 
@@ -411,16 +525,61 @@ namespace fastJSON
             return (GenericSetter)dynamicSet.CreateDelegate(typeof(GenericSetter));
         }
 
-        internal static GenericSetter CreateSetMethod(Type type, PropertyInfo propertyInfo)
+        internal static FieldInfo GetGetterBackingField(PropertyInfo autoProperty)
         {
-            MethodInfo setMethod = propertyInfo.GetSetMethod();
+            var getMethod = autoProperty.GetGetMethod();
+            // Restrict operation to auto properties to avoid risking errors if a getter does not contain exactly one field read instruction (such as with calculated properties).
+            if (!getMethod.IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)) return null;
+
+            var byteCode = getMethod.GetMethodBody()?.GetILAsByteArray() ?? new byte[0];
+            //var byteCode = getMethod.GetMethodBody().GetILAsByteArray();
+            int pos = 0;
+            // Find the first LdFld instruction and parse its operand to a FieldInfo object.
+            while (pos < byteCode.Length)
+            {
+                // Read and parse the OpCode (it can be 1 or 2 bytes in size).
+                byte code = byteCode[pos++];
+                if (!(TryGetOpCode(code, out var opCode) || pos < byteCode.Length && TryGetOpCode((short)(code * 0x100 + byteCode[pos++]), out opCode)))
+                    throw new NotSupportedException("Unknown IL code detected.");
+                // If it is a LdFld, read its operand, parse it to a FieldInfo and return it.
+                if (opCode == OpCodes.Ldfld && opCode.OperandType == OperandType.InlineField && pos + sizeof(int) <= byteCode.Length)
+                {
+                    return getMethod.Module.ResolveMember(BitConverter.ToInt32(byteCode, pos), getMethod.DeclaringType?.GetGenericArguments(), null) as FieldInfo;
+                }
+                // Otherwise, set the current position to the start of the next instruction, if any (we need to know how much bytes are used by operands).
+                pos += opCode.OperandType == OperandType.InlineNone
+                            ? 0
+                            : opCode.OperandType == OperandType.ShortInlineBrTarget ||
+                              opCode.OperandType == OperandType.ShortInlineI ||
+                              opCode.OperandType == OperandType.ShortInlineVar
+                                ? 1
+                                : opCode.OperandType == OperandType.InlineVar
+                                    ? 2
+                                    : opCode.OperandType == OperandType.InlineI8 ||
+                                      opCode.OperandType == OperandType.InlineR
+                                        ? 8
+                                        : opCode.OperandType == OperandType.InlineSwitch
+                                            ? 4 * (BitConverter.ToInt32(byteCode, pos) + 1)
+                                            : 4;
+            }
+            return null;
+        }
+
+        internal static GenericSetter CreateSetMethod(Type type, PropertyInfo propertyInfo, bool ShowReadOnlyProperties)
+        {
+            MethodInfo setMethod = propertyInfo.GetSetMethod(ShowReadOnlyProperties);
             if (setMethod == null)
-                return null;
+            {
+                if (!ShowReadOnlyProperties) return null;
+                // If the property has no setter and it is an auto property, try and create a setter for its backing field instead 
+                var fld = GetGetterBackingField(propertyInfo);
+                return fld != null ? CreateSetField(type, fld) : null;
+            }
 
             Type[] arguments = new Type[2];
             arguments[0] = arguments[1] = typeof(object);
 
-            DynamicMethod setter = new DynamicMethod("_", typeof(object), arguments);
+            DynamicMethod setter = new DynamicMethod("_csm", typeof(object), arguments, true);// !setMethod.IsPublic); // fix: skipverify
             ILGenerator il = setter.GetILGenerator();
 
             if (!type.IsClass) // structs
@@ -472,7 +631,7 @@ namespace fastJSON
 
         internal static GenericGetter CreateGetField(Type type, FieldInfo fieldInfo)
         {
-            DynamicMethod dynamicGet = new DynamicMethod("_", typeof(object), new Type[] { typeof(object) }, type);
+            DynamicMethod dynamicGet = new DynamicMethod("_cgf", typeof(object), new Type[] { typeof(object) }, type, true);
 
             ILGenerator il = dynamicGet.GetILGenerator();
 
@@ -506,7 +665,7 @@ namespace fastJSON
             if (getMethod == null)
                 return null;
 
-            DynamicMethod getter = new DynamicMethod("_", typeof(object), new Type[] { typeof(object) }, type);
+            DynamicMethod getter = new DynamicMethod("_cgm", typeof(object), new Type[] { typeof(object) }, type, true);
 
             ILGenerator il = getter.GetILGenerator();
 
@@ -541,12 +700,11 @@ namespace fastJSON
             return (GenericGetter)getter.CreateDelegate(typeof(GenericGetter));
         }
 
-        internal Getters[] GetGetters(Type type, bool ShowReadOnlyProperties, List<Type> IgnoreAttributes)
+        public Getters[] GetGetters(Type type, bool ShowReadOnlyProperties, List<Type> IgnoreAttributes)
         {
             Getters[] val = null;
             if (_getterscache.TryGetValue(type, out val))
                 return val;
-            //bool isAnonymous = IsAnonymousType(type);
 
             var bf = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
             //if (ShowReadOnlyProperties)
@@ -576,7 +734,7 @@ namespace fastJSON
                         continue;
                 }
                 string mName = null;
-                #if net4
+#if NET4
                 var att = p.GetCustomAttributes(true);
                 foreach (var at in att)
                 {
@@ -589,10 +747,10 @@ namespace fastJSON
                         }
                     }
                 }
-                #endif
+#endif
                 GenericGetter g = CreateGetMethod(type, p);
                 if (g != null)
-                    getters.Add(new Getters { Getter = g, Name = p.Name, lcName = p.Name.ToLower(), memberName = mName });
+                    getters.Add(new Getters { Getter = g, Name = p.Name, lcName = p.Name.ToLowerInvariant(), memberName = mName });
             }
 
             FieldInfo[] fi = type.GetFields(bf);
@@ -613,7 +771,7 @@ namespace fastJSON
                         continue;
                 }
                 string mName = null;
-#if net4
+#if NET4
                 var att = f.GetCustomAttributes(true);
                 foreach (var at in att)
                 {
@@ -631,7 +789,7 @@ namespace fastJSON
                 {
                     GenericGetter g = CreateGetField(type, f);
                     if (g != null)
-                        getters.Add(new Getters { Getter = g, Name = f.Name, lcName = f.Name.ToLower(), memberName = mName });
+                        getters.Add(new Getters { Getter = g, Name = f.Name, lcName = f.Name.ToLowerInvariant(), memberName = mName });
                 }
             }
             val = getters.ToArray();
@@ -655,7 +813,7 @@ namespace fastJSON
 
         //    return false;
         //}
-#endregion
+        #endregion
 
         internal void ResetPropertyCache()
         {
@@ -664,13 +822,13 @@ namespace fastJSON
 
         internal void ClearReflectionCache()
         {
-            _tyname = new SafeDictionary<Type, string>();
-            _typecache = new SafeDictionary<string, Type>();
-            _constrcache = new SafeDictionary<Type, CreateObject>();
-            _getterscache = new SafeDictionary<Type, Getters[]>();
-            _propertycache = new SafeDictionary<string, Dictionary<string, myPropInfo>>();
-            _genericTypes = new SafeDictionary<Type, Type[]>();
-            _genericTypeDef = new SafeDictionary<Type, Type>();
+            _tyname = new SafeDictionary<Type, string>(10);
+            _typecache = new SafeDictionary<string, Type>(10);
+            _constrcache = new SafeDictionary<Type, CreateObject>(10);
+            _getterscache = new SafeDictionary<Type, Getters[]>(10);
+            _propertycache = new SafeDictionary<string, Dictionary<string, myPropInfo>>(10);
+            _genericTypes = new SafeDictionary<Type, Type[]>(10);
+            _genericTypeDef = new SafeDictionary<Type, Type>(10);
         }
     }
 }

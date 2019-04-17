@@ -13,8 +13,8 @@ using System.Linq.Expressions;
 using System.Diagnostics;
 using System.Linq;
 using System.Dynamic;
-using System.IO;
 using System.Runtime.Serialization;
+using System.Collections.ObjectModel;
 
 //namespace UnitTests
 //{
@@ -900,7 +900,7 @@ public class tests
     public static void DynamicTest()
     {
         string s = "{\"Name\":\"aaaaaa\",\"Age\":10,\"dob\":\"2000-01-01 00:00:00Z\",\"inner\":{\"prop\":30},\"arr\":[1,{\"a\":2},3,4,5,6]}";
-        dynamic d = fastJSON.JSON.ToDynamic(s);
+        dynamic d = JSON.ToDynamic(s);
         var ss = d.Name;
         var oo = d.Age;
         var dob = d.dob;
@@ -914,12 +914,12 @@ public class tests
 
         s = "{\"ints\":[1,2,3,4,5]}";
 
-        d = fastJSON.JSON.ToDynamic(s);
+        d = JSON.ToDynamic(s);
         var o = d.ints[0];
         Assert.AreEqual(1, o);
 
         s = "[1,2,3,4,5,{\"key\":90}]";
-        d = fastJSON.JSON.ToDynamic(s);
+        d = JSON.ToDynamic(s);
         o = d[2];
         Assert.AreEqual(3, o);
         var p = d[5].key;
@@ -1271,7 +1271,7 @@ public class tests
             {
                 if (objtype.IsClass)
                 {
-                    DynamicMethod dynMethod = new DynamicMethod("_", objtype, null);
+                    DynamicMethod dynMethod = new DynamicMethod("_fcc", objtype, null, true);
                     ILGenerator ilGen = dynMethod.GetILGenerator();
                     ilGen.Emit(OpCodes.Newobj, objtype.GetConstructor(Type.EmptyTypes));
                     ilGen.Emit(OpCodes.Ret);
@@ -1280,7 +1280,7 @@ public class tests
                 }
                 else // structs
                 {
-                    DynamicMethod dynMethod = new DynamicMethod("_", typeof(object), null);
+                    DynamicMethod dynMethod = new DynamicMethod("_fcs", typeof(object), null, true);
                     ILGenerator ilGen = dynMethod.GetILGenerator();
                     var lv = ilGen.DeclareLocal(objtype);
                     ilGen.Emit(OpCodes.Ldloca_S, lv);
@@ -2813,10 +2813,10 @@ public class tests
         var data2 = JSON.ToObject<TestData>(jsonData);
 
         // OK, since data member name is "foo" which is all in lower case
-        Assert.AreEqual(data.Foo ,data2.Foo);
+        Assert.AreEqual(data.Foo, data2.Foo);
 
         // Fails, since data member name is "Bar", but the library looks for "bar" when setting the value
-        Assert.AreEqual(data.Bar , data2.Bar);
+        Assert.AreEqual(data.Bar, data2.Bar);
     }
 
 
@@ -2824,7 +2824,7 @@ public class tests
     [Test]
     public static void ArrayOfObjectExtOff()
     {
-        var s = JSON.ToJSON(new test[] { new test(), new test() }, new JSONParameters { UseExtensions = false});
+        var s = JSON.ToJSON(new test[] { new test(), new test() }, new JSONParameters { UseExtensions = false });
         var o = JSON.ToObject<test[]>(s);
         Console.WriteLine(o.GetType().ToString());
         Assert.AreEqual(typeof(test[]), o.GetType());
@@ -2878,5 +2878,146 @@ public class tests
         Assert.AreEqual("here", o.address);
         Assert.AreEqual(42, o.age);
     }
+
+    public class cis
+    {
+        public string age;
+    }
+
+    [Test]
+    public static void ConvertInt2String()
+    {
+        var s = "{\"age\":42}";
+        var o = JSON.ToObject<cis>(s);
+    }
+
+    [Test]
+    public static void dicofdic()
+    {
+        var s = "{ 'Section1' : { 'Key1' : 'Value1', 'Key2' : 'Value2', 'Key3' : 'Value3', 'Key4' : 'Value4', 'Key5' : 'Value5' } }".Replace("\'", "\"");
+        var o = JSON.ToObject<Dictionary<string, Dictionary<string, string>>>(s);
+        var v = o["Section1"];
+
+        Assert.AreEqual(5, v.Count);
+        Assert.AreEqual("Value2", v["Key2"]);
+    }
+
+    public class readonlyProps
+    {
+        public List<string> Collection { get; }
+
+        public readonlyProps(List<string> collection)
+        {
+            Collection = collection;
+        }
+
+        public readonlyProps()
+        {
+        }
+    }
+
+    [Test]
+    public static void ReadOnlyProperty() // rbeurskens 
+    {
+        var dto = new readonlyProps(new List<string> { "test", "test2" });
+
+        JSON.Parameters.ShowReadOnlyProperties = true;
+        var s = JSON.ToJSON(dto);
+        var o = JSON.ToObject<readonlyProps>(s);
+
+        Assert.IsNotNull(o);
+        CollectionAssert.AreEqual(dto.Collection, o.Collection);
+    }
+
+    public class nsb
+    {
+        public bool one = false; // number 1
+        public bool two = false; // string 1
+        public bool three = false; // string true
+        public bool four = false; // string on
+        public bool five = false; // string yes
+    }
+    [Test]
+    public static void NonStrictBoolean()
+    {
+        var s = "{'one':1,'two':'1','three':'true','four':'on','five':'yes'}".Replace("\'", "\"");
+
+        var o = JSON.ToObject<nsb>(s);
+        Assert.AreEqual(true, o.one);
+        Assert.AreEqual(true, o.two);
+        Assert.AreEqual(true, o.three);
+        Assert.AreEqual(true, o.four);
+        Assert.AreEqual(true, o.five);
+    }
+
+    private class npc
+    {
+        public int a = 1;
+        public int b = 2;
+    }
+    [Test]
+    public static void NonPublicClass()
+    {
+        var p = new npc();
+        p.a = 10;
+        p.b = 20;
+        var s = JSON.ToJSON(p);
+        var o = (npc)JSON.ToObject(s);
+        Assert.AreEqual(10, o.a);
+        Assert.AreEqual(20, o.b);
+    }
+
+    public class Item
+    {
+        public int Id { get; set; }
+        public string Data { get; set; }
+    }
+
+    public class TestObject
+    {
+        public int Id { get; set; }
+        public string Stuff { get; set; }
+        public virtual ObservableCollection<Item> Items { get; set; }
+    }
+
+
+    [Test]
+    public static void noncapacitylist()
+    {
+        TestObject testObject = new TestObject
+        {
+            Id = 1,
+            Stuff = "test",
+            Items = new ObservableCollection<Item>()
+        };
+
+        testObject.Items.Add(new Item { Id = 1, Data = "Item 1" });
+        testObject.Items.Add(new Item { Id = 2, Data = "Item 2" });
+
+        string jsonData = fastJSON.JSON.ToNiceJSON(testObject);
+        Console.WriteLine(jsonData);
+
+        TestObject copyObject = new TestObject();
+        fastJSON.JSON.FillObject(copyObject, jsonData);
+    }
+
+    [Test]
+    public static void Dates()
+    {
+        var s = "\"2018-09-01T09:38:27\"";
+
+        var d = JSON.ToObject<DateTime>(s, new JSONParameters { UseUTCDateTime = false });
+
+        Assert.AreEqual(9, d.Hour);
+    }
+
+
+    //[Test]
+    //public static void autoconvtest()
+    //{
+    //    var j = JSON.ToObject<int>("\"G\"", new JSONParameters { AutoConvertStringToNumbers = false });
+    //    var i = JSON.ToObject<Item>("{\"Id\":\"G\"}", new JSONParameters { AutoConvertStringToNumbers = false });
+    //}
+
 }// UnitTests.Tests
 //}
